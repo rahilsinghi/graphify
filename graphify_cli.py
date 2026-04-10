@@ -13,7 +13,7 @@ import json
 import sys
 from pathlib import Path
 
-from graphify import extract, collect_files, build_from_json
+from graphify import extract, build_from_json
 from graphify.build import build
 from graphify.analyze import god_nodes, surprising_connections, suggest_questions
 from graphify.report import generate as generate_report
@@ -53,32 +53,47 @@ def main():
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Set API key for potential future semantic inference
+    if args.anthropic_key:
+        import os
+        os.environ["ANTHROPIC_API_KEY"] = args.anthropic_key
+
     for repo_path in args.repos:
         repo_name = repo_path.name
         repo_out = args.output_dir / repo_name
         repo_out.mkdir(parents=True, exist_ok=True)
 
         # 1. Detect files
-        if args.incremental:
-            detection = detect_incremental(repo_path)
-        else:
-            detection = detect(repo_path)
+        try:
+            if args.incremental:
+                detection = detect_incremental(repo_path)
+            else:
+                detection = detect(repo_path)
+        except Exception as exc:
+            print(f"[graphify] {repo_name}: detect failed: {exc}", file=sys.stderr)
+            continue
 
-        code_files = detection["files"].get("code", [])
+        # For incremental mode, use only new/modified files; for full mode, use all files
+        files_key = "new_files" if args.incremental and "new_files" in detection else "files"
+        code_files = detection[files_key].get("code", [])
         if not code_files:
             print(f"[graphify] {repo_name}: no code files found, skipping")
             continue
 
         # 2. AST extraction (deterministic, cached per-file SHA256)
         paths = [Path(f) for f in code_files]
-        ast_extraction = extract(paths)
+        try:
+            ast_extraction = extract(paths)
+        except Exception as exc:
+            print(f"[graphify] {repo_name}: extract failed: {exc}", file=sys.stderr)
+            continue
 
         # 3. Collect extractions to merge
         extractions = [ast_extraction]
 
         # 4. Optional: semantic extraction (v1: cached results only)
         if args.semantic:
-            doc_files = detection["files"].get("document", [])
+            doc_files = detection[files_key].get("document", [])
             if doc_files:
                 cached_nodes, cached_edges, cached_hyper, uncached = \
                     check_semantic_cache(doc_files, root=repo_path)
@@ -89,18 +104,25 @@ def main():
                         file=sys.stderr,
                     )
                 if cached_nodes:
-                    extractions.append({
+                    semantic_extraction = {
                         "nodes": cached_nodes,
                         "edges": cached_edges,
                         "input_tokens": 0,
                         "output_tokens": 0,
-                    })
+                    }
+                    if cached_hyper:
+                        semantic_extraction["hyperedges"] = cached_hyper
+                    extractions.append(semantic_extraction)
 
         # 5. Build graph
         if len(extractions) == 1:
             G = build_from_json(extractions[0])
         else:
             G = build(extractions)
+
+        if G.number_of_nodes() == 0:
+            print(f"[graphify] {repo_name}: empty graph after extraction, skipping")
+            continue
 
         # 6. Community detection
         communities = cluster(G)
@@ -144,6 +166,9 @@ def main():
             label = node_data.get("label", node_id)
             community = node_community.get(node_id, -1)
 
+            # Note: G is undirected, so neighbors include both in/out edges.
+            # This means imports/calls lists may include reverse relationships.
+            # Acceptable for v1 file summaries — directional accuracy is a v2 concern.
             neighbors = list(G.neighbors(node_id))
             imports = [
                 G.nodes[n].get("label", n) for n in neighbors
@@ -189,7 +214,11 @@ def main():
                 f"{calls_md}\n"
             )
 
-            slug = f"{repo_name}_{source_file.replace('/', '_').replace('.', '_')}"
+            try:
+                rel_path = str(Path(source_file).relative_to(repo_path))
+            except ValueError:
+                rel_path = Path(source_file).name
+            slug = f"{repo_name}_{rel_path.replace('/', '_').replace('.', '_')}"
             (summaries_dir / f"{slug}.md").write_text(summary, encoding="utf-8")
 
         node_count = G.number_of_nodes()
