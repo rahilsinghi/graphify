@@ -15,10 +15,6 @@ def __getattr__(name):
         "suggest_questions": ("graphify.analyze", "suggest_questions"),
         "generate": ("graphify.report", "generate"),
         "to_json": ("graphify.export", "to_json"),
-        "to_html": ("graphify.export", "to_html"),
-        "to_svg": ("graphify.export", "to_svg"),
-        "to_canvas": ("graphify.export", "to_canvas"),
-        "to_wiki": ("graphify.wiki", "to_wiki"),
     }
     if name in _map:
         import importlib
