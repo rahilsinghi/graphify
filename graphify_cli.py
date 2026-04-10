@@ -13,7 +13,8 @@ import json
 import sys
 from pathlib import Path
 
-from graphify import extract, build_from_json
+from graphify.extract import extract
+from graphify.build import build_from_json
 from graphify.build import build
 from graphify.analyze import god_nodes, surprising_connections, suggest_questions
 from graphify.report import generate as generate_report
